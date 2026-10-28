@@ -142,6 +142,9 @@ NS_INLINE void _DTXCalcLinearPinchStartEndPoints(CGRect bounds, CGFloat pixelsSc
     dispatch_queue_t _hidEventQueue;
     NSTimeInterval _keepAliveInterval;
     NSTimer *_keepAliveTimer;
+    // StarkHub multitouch slots (independent of the single-pointer path above)
+    BOOL _mtActive[STMultiTouchMaxSlots];
+    CGPoint _mtPoints[STMultiTouchMaxSlots];
 }
 
 + (STHIDEventGenerator *)sharedGenerator {
@@ -1668,6 +1671,89 @@ static inline uint32_t hidUsageCodeForCharacter(NSString *key) {
     _sendHIDEvent(markerEvent, _hidEventQueue);
     CFRelease(markerEvent);
 #endif
+}
+
+#pragma mark - StarkHub multitouch
+
+// Identities for multitouch fingers: far from the single-pointer path (which uses 2, 3, ...).
+static int multiTouchIdentity(NSUInteger slot) { return (int)(11 + slot); }
+
+- (void)_sendMultiTouchFrom:(const BOOL *)wasActive {
+    BOOL anyEdge = NO, anyMove = NO, anyNow = NO;
+    for (NSUInteger i = 0; i < STMultiTouchMaxSlots; ++i) {
+        if (wasActive[i] != _mtActive[i])
+            anyEdge = YES;
+        else if (_mtActive[i])
+            anyMove = YES;
+        if (_mtActive[i])
+            anyNow = YES;
+    }
+    if (!anyEdge && !anyMove)
+        return;
+
+    IOHIDDigitizerEventMask handMask = 0;
+    if (anyEdge)
+        handMask |= kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventIdentity;
+    if (anyMove)
+        handMask |= kIOHIDDigitizerEventPosition | kIOHIDDigitizerEventAttribute;
+
+    uint64_t machTime = mach_absolute_time();
+    IOHIDEventRef eventRef =
+        IOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, machTime, kIOHIDDigitizerTransducerTypeHand, 0, 0,
+                                       handMask, 0, 0, 0, 0, 0, 0, 0, anyNow, kIOHIDEventOptionNone);
+    IOHIDEventSetIntegerValue(eventRef, kIOHIDEventFieldIsBuiltIn, 1);
+    IOHIDEventSetIntegerValue(eventRef, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+
+    for (NSUInteger i = 0; i < STMultiTouchMaxSlots; ++i) {
+        BOOL was = wasActive[i], now = _mtActive[i];
+        if (!was && !now)
+            continue;
+        IOHIDDigitizerEventMask childMask = 0;
+        if (was != now)
+            childMask = kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange | kIOHIDDigitizerEventIdentity;
+        else
+            childMask = kIOHIDDigitizerEventPosition | kIOHIDDigitizerEventAttribute;
+        CGPoint p = CGPointMake(_mtPoints[i].x / _physicalScreenSize.width, _mtPoints[i].y / _physicalScreenSize.height);
+        int ident = multiTouchIdentity(i);
+        IOHIDEventRef sub = IOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, machTime, ident, ident, childMask,
+                                                                p.x, p.y, 0, defaultPathPressure, 90.0, now, now,
+                                                                kIOHIDEventOptionNone);
+        IOHIDFloat radius = now ? defaultMajorRadius : 0;
+        IOHIDEventSetFloatValue(sub, kIOHIDEventFieldDigitizerMinorRadius, radius);
+        IOHIDEventSetFloatValue(sub, kIOHIDEventFieldDigitizerMajorRadius, radius);
+        IOHIDEventAppendEvent(eventRef, sub, 0);
+        CFRelease(sub);
+    }
+
+    _sendHIDEvent(eventRef, _hidEventQueue);
+    CFRelease(eventRef);
+}
+
+- (void)applyMultiTouchUpdates:(const STMultiTouchUpdate *)updates count:(NSUInteger)count {
+    if (!updates || !count)
+        return;
+    @synchronized(self) {
+        BOOL wasActive[STMultiTouchMaxSlots];
+        memcpy(wasActive, _mtActive, sizeof(wasActive));
+        for (NSUInteger k = 0; k < count; ++k) {
+            NSUInteger slot = updates[k].slot;
+            if (slot >= STMultiTouchMaxSlots)
+                continue;
+            _mtActive[slot] = updates[k].active;
+            if (updates[k].active)
+                _mtPoints[slot] = updates[k].point;
+        }
+        [self _sendMultiTouchFrom:wasActive];
+    }
+}
+
+- (void)resetMultiTouch {
+    @synchronized(self) {
+        BOOL wasActive[STMultiTouchMaxSlots];
+        memcpy(wasActive, _mtActive, sizeof(wasActive));
+        memset(_mtActive, 0, sizeof(_mtActive));
+        [self _sendMultiTouchFrom:wasActive];
+    }
 }
 
 @end

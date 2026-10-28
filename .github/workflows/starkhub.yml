@@ -1,0 +1,69 @@
+# StarkHub: сборка rootless-пакета TrollVNC с мультитачем (игровой режим StarkHub).
+# Готовый .deb коммитится в папку dist/ этой же ветки — его можно забрать обычным git.
+name: StarkHub TrollVNC (rootless)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: choice
+        description: Раннер (arm64-раннеры GitHub иногда часами стоят в очереди)
+        default: macos-15-intel
+        options:
+          - macos-15-intel
+          - macos-14
+          - macos-15
+
+permissions:
+  contents: write
+
+env:
+  FINALPACKAGE: 1
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install xcbeautify ldid-procursus p7zip make
+
+      - name: Checkout roothide/theos
+        uses: actions/checkout@v4
+        with:
+          repository: roothide/theos
+          path: theos-roothide
+          submodules: recursive
+
+      - name: Install iOS SDKs
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos-roothide
+          cd theos-roothide
+          ./bin/install-sdk iPhoneOS16.5
+          ./bin/install-sdk iPhoneOS14.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build package (rootless)
+        run: |
+          source devkit/rootless.sh
+          FINALPACKAGE=1 gmake clean package
+          ls -l packages
+
+      - name: Commit .deb to branch
+        run: |
+          mkdir -p dist && rm -f dist/*.deb && cp packages/*.deb dist/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/*.deb
+          git commit -m "build: $(ls dist/*.deb | xargs -n1 basename | tr '\n' ' ')" || echo "нечего коммитить"
+          git push origin HEAD:${GITHUB_REF_NAME}

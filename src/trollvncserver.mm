@@ -4598,7 +4598,73 @@ static void setupRfbScreen(int argc, const char *argv[]) {
     gScreen->setDesktopSizeHook = setDesktopSizeHook;
 }
 
+#pragma mark - StarkHub multitouch extension
+
+// Client -> server message (StarkHub game mode): several fingers at once.
+//   u8 type = 239, u8 version = 1, u8 count (0..10), u8 reserved
+//   count x { u8 slot, u8 flags (bit0 = finger down), u16 x, u16 y }   (big-endian, VNC framebuffer coordinates)
+// Slots not mentioned keep their state. The client must only send this when it knows the server supports it
+// (StarkHub checks the installed component pack) - unknown message types make a VNC server drop the connection.
+#define TV_STARKHUB_MT_MSG 239
+#define TV_STARKHUB_MT_VERSION 1
+
+static rfbBool tvMTNewClient(rfbClientPtr cl, void **data) {
+    (void)cl;
+    *data = NULL;
+    return TRUE;
+}
+
+static rfbBool tvMTHandleMessage(rfbClientPtr cl, void *data, const rfbClientToServerMsg *msg) {
+    (void)data;
+    if (msg->type != TV_STARKHUB_MT_MSG)
+        return FALSE;
+    uint8_t hdr[3];
+    if (rfbReadExact(cl, (char *)hdr, sizeof(hdr)) <= 0) {
+        rfbCloseClient(cl);
+        return TRUE;
+    }
+    uint8_t count = hdr[1];
+    if (hdr[0] != TV_STARKHUB_MT_VERSION || count > STMultiTouchMaxSlots) {
+        TVLog(@"StarkHub multitouch: bad header (version %u, count %u) - closing client", (unsigned)hdr[0], (unsigned)count);
+        rfbCloseClient(cl);
+        return TRUE;
+    }
+    uint8_t body[STMultiTouchMaxSlots * 6];
+    if (count && rfbReadExact(cl, (char *)body, count * 6) <= 0) {
+        rfbCloseClient(cl);
+        return TRUE;
+    }
+    if (gViewOnly || cl->viewOnly || !count)
+        return TRUE;
+    STMultiTouchUpdate ups[STMultiTouchMaxSlots];
+    NSUInteger n = 0;
+    for (uint8_t i = 0; i < count; ++i) {
+        const uint8_t *b = body + i * 6;
+        if (b[0] >= STMultiTouchMaxSlots)
+            continue;
+        int x = (b[2] << 8) | b[3];
+        int y = (b[4] << 8) | b[5];
+        ups[n].slot = b[0];
+        ups[n].active = (b[1] & 1) != 0;
+        ups[n].point = vncPointToDevicePoint(x, y);
+        n++;
+    }
+    [[STHIDEventGenerator sharedGenerator] applyMultiTouchUpdates:ups count:n];
+    return TRUE;
+}
+
+static void tvMTClose(rfbClientPtr cl, void *data) {
+    (void)cl;
+    (void)data;
+    [[STHIDEventGenerator sharedGenerator] resetMultiTouch];
+}
+
+static rfbProtocolExtension gStarkHubMultiTouchExtension = {
+    tvMTNewClient, NULL, NULL, NULL, tvMTHandleMessage, tvMTClose, NULL, NULL, NULL,
+};
+
 static void setupRfbEventHandlers(void) {
+    rfbRegisterProtocolExtension(&gStarkHubMultiTouchExtension);
     gScreen->ptrAddEvent = ptrAddEvent;
     gScreen->kbdAddEvent = kbdAddEvent;
     gScreen->kbdReleaseAllKeys = kbdReleaseAllKeys;

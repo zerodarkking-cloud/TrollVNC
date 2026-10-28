@@ -103,6 +103,16 @@ __used NS_INLINE void STAccurateSleep(NSTimeInterval seconds) {
 
 #pragma mark -
 
+/* StarkHub: multitouch from the VNC client (game mode). Each finger lives in its own slot and keeps a stable
+   identity, so a held joystick finger is not disturbed when another finger touches down or lifts. */
+static NSUInteger const STMultiTouchMaxSlots = 10;
+
+typedef struct {
+    NSUInteger slot;  // 0 .. STMultiTouchMaxSlots-1
+    BOOL active;      // YES = finger on glass at `point`, NO = lifted
+    CGPoint point;    // device point (same space as -touchDownAtPoints:)
+} STMultiTouchUpdate;
+
 @interface STHIDEventGenerator : NSObject
 
 + (STHIDEventGenerator *)sharedGenerator;
@@ -111,6 +121,11 @@ __used NS_INLINE void STAccurateSleep(NSTimeInterval seconds) {
 @property (nonatomic) NSTimeInterval keepAliveInterval;
 
 /* MARK: --- Touches --- */
+
+// StarkHub multitouch: apply changes for some slots (others keep their state) and send one hand event.
+- (void)applyMultiTouchUpdates:(const STMultiTouchUpdate *)updates count:(NSUInteger)count;
+// Lift every multitouch finger (client disconnected / game mode left).
+- (void)resetMultiTouch;
 
 - (void)touchDown:(CGPoint)location;
 - (void)liftUp:(CGPoint)location;
