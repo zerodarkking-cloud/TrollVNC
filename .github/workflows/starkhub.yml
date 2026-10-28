@@ -3,6 +3,9 @@
 name: StarkHub TrollVNC (rootless)
 
 on:
+  push:
+    branches: [starkhub-multitouch]
+    paths-ignore: ['dist/**']
   workflow_dispatch:
     inputs:
       runner:
@@ -24,7 +27,7 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
